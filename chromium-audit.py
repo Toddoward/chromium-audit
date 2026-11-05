@@ -17,19 +17,27 @@ What it does:
      folders, and byte-level strings inside CEF libraries.
   3. Judges each engine against the thresholds below.
   4. With --update, updates only through official channels:
-     Playwright via pip; Windows via winget, then the vendor updater;
+     Windows via winget, then the vendor updater;
      macOS via Homebrew casks; Linux via flatpak/snap (apt/dnf/pacman get a
      printed command, never silent elevation). Anything without an official
      path is reported for manual updating, never touched.
 
 Thresholds (verified 2026-11-05; see the README "Background" section):
+  - Exact Chromium versions are judged against the desktop Stable patch
+    waves Google published on Chrome Releases between 2026-10-13 and
+    2026-11-03: six updates fixing 686 security issues, 27 of them Critical
+    (PATCH_WAVES below). An engine below a wave's fix build is still
+    exposed to that wave's Criticals, and the audit lists exactly which
+    waves — and which CVEs — each engine is missing.
   - There is no official notice saying "Playwright chromium-1248 and below
-    are vulnerable". The authoritative source is Google's Chrome Releases
-    post of 2026-10-27: the four Criticals (CVE-2026-118306/118331/118348/
-    118344) were fixed in 156.0.8078.73/.74, so any Chromium below
-    156.0.8078.73 is affected. chromium-1243 = 153.0.8010.12 (Playwright
-    1.63.0); chromium-1248 = 156.0.8078.4 (Playwright 1.64.0/1.64.1) — no
-    Playwright release with a newer pin existed as of 2026-11-04.
+    are vulnerable". That claim was built by comparing fix builds with
+    Playwright's pin, spread on social media ("Playwright is vulnerable,
+    delete it"), and was rebutted by Playwright on 2026-11-03: its packages
+    bundle no browser, MCP/CLI drive the user's installed Chrome/Edge, and
+    only the test runner uses the pinned build. This tool therefore lists
+    Playwright cache builds for version reference only — never flagged,
+    never updated. (Pin reference: chromium-1243 = 153.0.8010.12;
+    chromium-1248 = 156.0.8078.4.)
   - Chrome current stable = 157.0.8103.38 (2026-11-03); fetched live from
     the VersionHistory API at runtime, with this value as fallback.
   - Edge / WebView2 cannot be compared numerically with Chromium (only the
@@ -57,10 +65,38 @@ import subprocess
 import sys
 
 VULN_CONFIRMED = (153, 0, 8010, 12)   # at/below: old vulnerable generation (chromium-1243)
-CVE_FIXED = (156, 0, 8078, 73)        # fix build for the four Criticals (Chrome Releases 2026-10-27)
 NOTICE_BOUNDARY = (156, 0, 8078, 4)   # engine version of chromium-1248 (reference)
 LATEST_STABLE = (157, 0, 8103, 38)    # built-in fallback; refreshed via the VersionHistory API
-PLAYWRIGHT_VULN_MAX = 1248
+
+# Desktop Stable patch waves (Chrome Releases, 2026-10-13 .. 2026-11-03):
+# (post date, first fixed build, total security fixes, [(Critical CVE, component)])
+# An engine below a wave's fix build is still exposed to that wave's Criticals.
+PATCH_WAVES = [
+    ("2026-10-13", (155, 0, 8059, 79), 37, [
+        ("CVE-2026-110152", "ANGLE"), ("CVE-2026-110149", "Browser"),
+        ("CVE-2026-110136", "PDF"), ("CVE-2026-110161", "Network"),
+        ("CVE-2026-110165", "Core"), ("CVE-2026-110148", "SVG"),
+        ("CVE-2026-110151", "Media")]),
+    ("2026-10-15", (155, 0, 8059, 84), 10, [
+        ("CVE-2026-110922", "Prerender")]),
+    ("2026-10-20", (156, 0, 8078, 47), 353, [
+        ("CVE-2026-120931", "WebGL"), ("CVE-2026-113341", "Skia"),
+        ("CVE-2026-113279", "Accessibility"), ("CVE-2026-113072", "CSS"),
+        ("CVE-2026-113280", "Paint"), ("CVE-2026-113271", "Accessibility"),
+        ("CVE-2026-113303", "WebRTC")]),
+    ("2026-10-27", (156, 0, 8078, 73), 52, [
+        ("CVE-2026-118306", "FileSystem"), ("CVE-2026-118331", "FileAPI"),
+        ("CVE-2026-118348", "Skia"), ("CVE-2026-118344", "Layout")]),
+    ("2026-10-29", (156, 0, 8078, 79), 21, [
+        ("CVE-2026-76024", "MediaStream")]),
+    ("2026-11-03", (157, 0, 8103, 38), 213, [
+        ("CVE-2026-121156", "Dawn"), ("CVE-2026-121247", "Dawn"),
+        ("CVE-2026-121229", "ANGLE"), ("CVE-2026-121246", "WebGL"),
+        ("CVE-2026-121035", "Prerender"), ("CVE-2026-121203", "Geometry"),
+        ("CVE-2026-121126", "Core")]),
+]
+WAVE_CRITICALS = sum(len(w[3]) for w in PATCH_WAVES)   # 27
+CVE_FIXED = PATCH_WAVES[3][1]         # 2026-10-27 wave build (the original four Criticals)
 
 # ---------------------------------------------------------------- i18n
 LANG = "en"
@@ -86,8 +122,10 @@ LSTR = {
                   "en": "Edge milestone {m} — current generation"},
     "v_old": {"ko": "구세대 취약 빌드 계열 (chromium-1243 이하 상당)",
               "en": "Old-generation vulnerable build (chromium-1243 class or below)"},
-    "v_cve": {"ko": "Critical 4건(CVE-2026-118306 등) 수정 빌드 {v} 미만 — 취약",
-              "en": "Below the fix build {v} for the four Critical CVEs (CVE-2026-118306 etc.) — vulnerable"},
+    "v_waves": {"ko": "미패치 웨이브 {n}개 — Critical {c}건에 노출 (아래 상세)",
+              "en": "{n} unpatched patch wave(s) — exposed to {c} Critical CVE(s) (details below)"},
+    "wave_line": {"ko": "· {date} 웨이브 — 수정 빌드 {v}부터 패치 (전체 {t}건 중 Critical {c}건): {ids}",
+              "en": "· {date} wave — fixed in {v} ({c} Critical of {t} fixes): {ids}"},
     "v_behind": {"ko": "최신 안정({v}) 미만 — 업데이트 권장 (벤더 백포트 여부는 별도)",
                  "en": "Behind current stable ({v}) — update recommended (vendor backports aside)"},
     "v_ok": {"ko": "최신 수준", "en": "Up to date"},
@@ -97,16 +135,14 @@ LSTR = {
                     "en": "Embedded Chromium engine {v} (CEF) — browser criteria do not apply. Only the app vendor can replace the engine; keep the app updated"},
     "embed_inexact": {"ko": "내장 엔진 마일스톤 {m} (CEF 버전 표기 {v} — 세부 패치 수준은 파일에서 확인 불가) — 앱 최신 유지가 유일한 조치",
                       "en": "Embedded engine milestone {m} (CEF stamp {v} — patch level not readable from files) — keep the app updated"},
-    "pw_note": {"ko": " / Playwright 최신 안정(1.64.1)도 아직 1248 고정 — 수정 빌드를 실은 릴리스 미출시(2026-11-04 기준)",
-                "en": " / The latest Playwright stable (1.64.1) still pins 1248 — no release with the fix yet (as of 2026-11-04)"},
-    "pw_rev": {"ko": " / Playwright 리비전 {rev} <= {mx} (공지 분류상 취약 범위)",
-               "en": " / Playwright revision {rev} <= {mx} (inside the announced vulnerable range)"},
+    "pw_info": {"ko": "Playwright 고정 빌드 (리비전 {rev}) — 버전 참고용으로만 표시합니다. 판정·업데이트 대상이 아닙니다",
+                "en": "Playwright pinned build (revision {rev}) — listed for version reference only; not audited or updated"},
     "pw_detail_rev": {"ko": "리비전 {rev}", "en": "revision {rev}"},
     "pw_detail_eng": {"ko": " / 엔진 실측 {v}", "en": " / measured engine {v}"},
     "title": {"ko": "Chromium 계열 브라우저 점검 (Windows/Linux/macOS)",
               "en": "Chromium browser audit (Windows/Linux/macOS)"},
-    "criteria": {"ko": "기준: 구세대 취약 <= {a} / CVE 수정 빌드 {b} / 최신 안정 {c} ({src})",
-                 "en": "Criteria: old-gen vulnerable <= {a} / CVE fix build {b} / current stable {c} ({src})"},
+    "criteria": {"ko": "기준: Stable 패치 웨이브 {n}개 ({d1}~{d2}, Critical {c}건) / 최신 안정 {v} ({src})",
+                 "en": "Criteria: {n} Stable patch waves ({d1} to {d2}, {c} Critical) / current stable {v} ({src})"},
     "none_found": {"ko": "Chromium 계열 브라우저를 찾지 못했습니다.",
                    "en": "No Chromium-based browsers found."},
     "conclusion": {"ko": "결론 (브라우저별 병합):", "en": "Conclusion (merged per browser):"},
@@ -246,7 +282,8 @@ def verdict(engine, family=None, latest=None):
       shared with Chromium (the milestone), and the exact patch level is not
       stored on disk, so they are judged by milestone alone.
     - Anything that exposes a true Chromium version (Chrome, Chrome for
-      Testing, ego, Playwright pins) is compared with the CVE fix build.
+      Testing, ego) is compared against the patch-wave ladder (PATCH_WAVES):
+      missing any wave means DANGER, with the missing waves listed.
     """
     if latest is None:
         latest = LATEST_STABLE
@@ -259,13 +296,23 @@ def verdict(engine, family=None, latest=None):
         if major == 156:
             return "WARN", T("v_edge_156")
         return "OK", T("v_edge_ok", m=major)
-    if engine <= VULN_CONFIRMED:
-        return "DANGER", T("v_old")
-    if engine < CVE_FIXED:
-        return "DANGER", T("v_cve", v=vstr(CVE_FIXED))
+    waves = unpatched_waves(engine)
+    if waves:
+        if engine <= VULN_CONFIRMED:
+            return "DANGER", T("v_old")
+        return "DANGER", T("v_waves", n=len(waves),
+                           c=sum(len(w[3]) for w in waves))
     if engine < latest:
         return "WARN", T("v_behind", v=vstr(latest))
     return "OK", T("v_ok")
+
+
+def unpatched_waves(engine):
+    """Patch waves whose fix build is newer than this engine — the engine
+    is still exposed to those waves' Critical CVEs."""
+    if engine is None:
+        return []
+    return [w for w in PATCH_WAVES if engine < w[1]]
 
 
 def fetch_latest_stable():
@@ -734,10 +781,7 @@ def try_update(item, dry_log):
     """Run only official update paths. Returns the commands that ran."""
     cmds = []
     name_low = item.name.lower()
-    if item.kind == "playwright":
-        cmds = [[sys.executable, "-m", "pip", "install", "-U", "playwright"],
-                [sys.executable, "-m", "playwright", "install", "chromium"]]
-    elif sys.platform == "win32":
+    if sys.platform == "win32":
         # Route by family only (substring matching on names misfires, e.g.
         # Search -> Arc). OBS Studio is absent from FAMILY_WINGET on purpose
         # (its winget route runs the full installer and dies at UAC).
@@ -977,17 +1021,25 @@ def main():
                 why = T("embed_exact", v=vstr(it.engine))
             else:
                 why = T("embed_inexact", m=it.engine[0], v=vstr(it.engine))
-        if it.pw_rev is not None and it.pw_rev <= PLAYWRIGHT_VULN_MAX:
-            why += T("pw_note")
-            if level == "OK":
-                level = "WARN"
-            why += T("pw_rev", rev=it.pw_rev, mx=PLAYWRIGHT_VULN_MAX)
+        if it.kind == "playwright":
+            # Reference only: the "Playwright is vulnerable" claim built on
+            # the pinned build's version was rebutted by Playwright
+            # (2026-11-03). Show the version, never flag or update it.
+            level = "INFO"
+            why = T("pw_info", rev=it.pw_rev)
         if level in ("DANGER", "WARN"):
             worst = 1
+        waves = []
+        if it.kind != "playwright" and it.engine and it.engine_exact:
+            waves = [{"date": d, "fixed_in": vstr(b), "total": t,
+                      "criticals": [{"id": cid, "component": comp}
+                                    for cid, comp in cs]}
+                     for d, b, t, cs in unpatched_waves(it.engine)]
         rows.append({
             "name": it.name, "path": it.path, "kind": it.kind,
             "product": vstr(it.product), "engine": vstr(it.engine),
             "level": level, "why": why, "detail": it.detail,
+            "waves": waves,
         })
 
     if args.json:
@@ -995,8 +1047,9 @@ def main():
     else:
         print("=" * 72)
         print(T("title"))
-        print(T("criteria", a=vstr(VULN_CONFIRMED), b=vstr(CVE_FIXED),
-                c=vstr(latest), src=latest_src))
+        print(T("criteria", n=len(PATCH_WAVES), d1=PATCH_WAVES[0][0],
+                d2=PATCH_WAVES[-1][0], c=WAVE_CRITICALS,
+                v=vstr(latest), src=latest_src))
         print("=" * 72)
         if not rows:
             print(T("none_found"))
@@ -1007,6 +1060,11 @@ def main():
                   f"{r['engine'] or T('unknown')} / {T('product_w')} {r['product'] or '-'}")
             print(f"       {r['path']}")
             print(f"       {r['why']}" + (f" / {r['detail']}" if r['detail'] else ""))
+            for w in r["waves"]:
+                ids = ", ".join(f"{c['id']} ({c['component']})" if c["component"]
+                                else c["id"] for c in w["criticals"])
+                print("       " + T("wave_line", date=w["date"], v=w["fixed_in"],
+                                    t=w["total"], c=len(w["criticals"]), ids=ids))
         if rows:
             print("-" * 72)
             print(T("conclusion"))
